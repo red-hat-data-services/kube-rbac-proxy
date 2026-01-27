@@ -1,37 +1,55 @@
+/*
+Copyright 2026 the kube-rbac-proxy maintainers. All rights reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package e2e
 
 import (
+	"context"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/brancz/kube-rbac-proxy/test/kubetest"
+	"github.com/brancz/kube-rbac-proxy/test/kubetest/testtemplates"
+)
+
+const (
+	hardcodedAuthorizerNamespace = "openshift-monitoring"
+	hardcodedAuthorizerClientSA  = "prometheus-k8s"
 )
 
 func testHardcodedAuthorizer(client kubernetes.Interface) kubetest.TestSuite {
 	return func(t *testing.T) {
 		command := `curl --connect-timeout 5 -v -s -k --fail -H "Authorization: Bearer $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" https://kube-rbac-proxy.openshift-monitoring.svc.cluster.local:8443/metrics`
-		ctx := &kubetest.ScenarioContext{
-			Namespace: "openshift-monitoring",
-		}
 
-		s := kubetest.Scenario{
+		kubetest.Scenario{
 			Name: "OpenShift Hardcoded Authorizer",
 			Description: `
-				Verify that the ServiceAccount prometheus-k8s can access the metrics endpoint of the kube-rbac-proxy
+				Verify that the ServiceAccount prometheus-k8s can access the metrics endpoint
+				of the kube-rbac-proxy via the OpenShift hardcoded authorizer
 			`,
 
 			Given: kubetest.Actions(
-				kubetest.CreatedManifests(
-					client,
-					"hardcoded_authorizer/namespace.yaml",
-					"hardcoded_authorizer/deployment.yaml",
-					"hardcoded_authorizer/clusterRole.yaml",
-					"hardcoded_authorizer/clusterRoleBinding.yaml",
-					"hardcoded_authorizer/service.yaml",
-					"hardcoded_authorizer/serviceAccount.yaml",
-					"hardcoded_authorizer/serviceAccount-client.yaml",
-				),
+				WithNamespace(client, hardcodedAuthorizerNamespace),
+				WithServiceAccount(client, hardcodedAuthorizerClientSA),
+				kubetest.NewBasicKubeRBACProxyTestConfig().
+					AddSAClusterRoleBinding("kube-rbac-proxy", testtemplates.GetKRPAuthDelegatorRole()).
+					Launch(client),
 			),
 			When: kubetest.Actions(
 				kubetest.PodsAreReady(
@@ -49,39 +67,54 @@ func testHardcodedAuthorizer(client kubernetes.Interface) kubetest.TestSuite {
 					client,
 					command,
 					&kubetest.RunOptions{
-						ServiceAccount: "prometheus-k8s",
+						ServiceAccount: hardcodedAuthorizerClientSA,
 					},
 				),
 			),
+		}.Run(t)
+	}
+}
+
+func WithNamespace(client kubernetes.Interface, namespace string) kubetest.Action {
+	return func(ctx *kubetest.ScenarioContext) error {
+		ctx.Namespace = namespace
+
+		ns := &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: ctx.Namespace,
+			},
 		}
 
-		defer func(ctx *kubetest.ScenarioContext) {
-			for _, f := range ctx.CleanUp {
-				if err := f(); err != nil {
-					panic(err)
-				}
-			}
-		}(ctx)
+		if _, err := client.CoreV1().Namespaces().Create(context.TODO(), ns, metav1.CreateOptions{}); err != nil {
+			return err
+		}
 
-		t.Run(s.Name, func(t *testing.T) {
-			if s.Given != nil {
-				if err := s.Given(ctx); err != nil {
-					t.Fatalf("failed to create given setup: %v", err)
-				}
-			}
-
-			if s.When != nil {
-				if err := s.When(ctx); err != nil {
-					t.Errorf("failed to evaluate state: %v", err)
-				}
-			}
-
-			if s.Then != nil {
-				if err := s.Then(ctx); err != nil {
-					t.Errorf("checks failed: %v", err)
-				}
-			}
+		ctx.AddCleanUp(func() error {
+			return client.CoreV1().Namespaces().Delete(context.TODO(), ctx.Namespace, metav1.DeleteOptions{})
 		})
-	}
 
+		return nil
+	}
+}
+
+func WithServiceAccount(client kubernetes.Interface, name string) kubetest.Action {
+	return func(ctx *kubetest.ScenarioContext) error {
+		// Create client service account (prometheus-k8s)
+		sa := &corev1.ServiceAccount{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: ctx.Namespace,
+			},
+		}
+
+		if _, err := client.CoreV1().ServiceAccounts(ctx.Namespace).Create(context.TODO(), sa, metav1.CreateOptions{}); err != nil {
+			return err
+		}
+
+		ctx.AddCleanUp(func() error {
+			return client.CoreV1().ServiceAccounts(ctx.Namespace).Delete(context.TODO(), sa.Name, metav1.DeleteOptions{})
+		})
+
+		return nil
+	}
 }
