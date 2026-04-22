@@ -1,0 +1,35 @@
+FROM registry.redhat.io/ubi9/go-toolset@sha256:d637b9dfccb16623f19b95c43fe5a65b20b722e62753c4445c5d02f9e40b807d AS builder
+USER root
+WORKDIR /go/src/github.com/brancz/kube-rbac-proxy
+COPY . .
+ENV GO111MODULE=on
+# vendor/ is not committed; generate it at build time
+RUN go mod vendor
+ENV GOFLAGS="-mod=vendor -tags=strictfipsruntime"
+ENV GOEXPERIMENT=strictfipsruntime
+ENV CGO_ENABLED=1
+ARG TARGETARCH
+RUN GOOS=linux VERSION=$(cat VERSION) GOARCH=${TARGETARCH} make build && \
+    cp _output/kube-rbac-proxy-linux-${TARGETARCH} _output/kube-rbac-proxy
+
+FROM registry.redhat.io/ubi9/ubi-minimal@sha256:175bafd5bc7893540ed6234bb979acfe3574fd6570e6762bbc527c757f854cea
+
+ARG FROM_DIRECTORY=/go/src/github.com/brancz/kube-rbac-proxy
+COPY --from=builder ${FROM_DIRECTORY}/_output/kube-rbac-proxy  /usr/bin/kube-rbac-proxy
+
+RUN mkdir -p /licenses
+COPY --from=builder ${FROM_DIRECTORY}/LICENSE /licenses/LICENSE.kube-rbac-proxy.txt
+
+USER 65534
+EXPOSE 8080
+ENTRYPOINT ["/usr/bin/kube-rbac-proxy"]
+
+LABEL com.redhat.component="odh-kube-rbac-proxy-rhel9" \
+      name="managed-open-data-hub/odh-kube-rbac-proxy-rhel9" \
+      io.k8s.description="This is a proxy, that can perform Kubernetes RBAC authorization." \
+      summary="odh-kube-rbac-proxy" \
+      maintainer="['managed-open-data-hub@redhat.com']" \
+      io.openshift.expose-services="" \
+      io.k8s.display-name="odh-kube-rbac-proxy" \
+      io.k8s.description="odh-kube-rbac-proxy" \
+      com.redhat.license_terms="https://www.redhat.com/licenses/Red_Hat_Standard_EULA_20191108.pdf"
