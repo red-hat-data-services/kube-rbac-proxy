@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/brancz/kube-rbac-proxy/pkg/authz"
@@ -35,6 +36,7 @@ func Test_parseAuthorizationConfigFile(t *testing.T) {
 		fileContent string
 		want        *authz.Config
 		wantErr     bool
+		wantErrSub  string
 	}{
 		{
 			name: "resources",
@@ -101,6 +103,98 @@ func Test_parseAuthorizationConfigFile(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "Format1 and Format2 in same file",
+			fileContent: `authorization:
+  rewrites:
+    byQueryParameter:
+      name: "namespace"
+  resourceAttributes:
+    resource: namespaces
+    subresource: metrics
+    namespace: "{{ .Value }}"
+  endpoints:
+    - path: /api/v1/evaluations/jobs/*/events
+      mappings:
+        - methods: [post]
+          resources:
+            - rewrites:
+                byHttpHeader:
+                  name: X-Tenant
+              resourceAttributes:
+                namespace: "{{.FromHeader}}"
+                apiGroup: trustyai.opendatahub.io
+                resource: status-events
+                verb: create`,
+			want: &authz.Config{
+				Rewrites: &authz.SubjectAccessReviewRewrites{
+					ByQueryParameter: &authz.QueryParameterRewriteConfig{Name: "namespace"},
+				},
+				ResourceAttributes: &authz.ResourceAttributes{
+					Resource:    "namespaces",
+					Subresource: "metrics",
+					Namespace:   "{{ .Value }}",
+				},
+				Endpoints: []authz.Endpoint{{
+					Path: "/api/v1/evaluations/jobs/*/events",
+					Mappings: []authz.EndpointMapping{{
+						Methods: []string{"post"},
+						Resources: []authz.EndpointResourceRule{{
+							Rewrites: authz.SubjectAccessReviewRewrites{
+								ByHTTPHeader: &authz.HTTPHeaderRewriteConfig{Name: "X-Tenant"},
+							},
+							ResourceAttributes: authz.ResourceAttributes{
+								Namespace: "{{.FromHeader}}",
+								APIGroup:  "trustyai.opendatahub.io",
+								Resource:  "status-events",
+								Verb:      "create",
+							},
+						}},
+					}},
+				}},
+			},
+		},
+		{
+			name: "Format2 mapping rejects empty methods list",
+			fileContent: `authorization:
+  endpoints:
+    - path: /api/v1/x
+      mappings:
+        - methods: []
+          resources:
+            - resourceAttributes:
+                resource: pods
+                verb: get`,
+			want:       nil,
+			wantErr:    true,
+			wantErrSub: "non-empty methods",
+		},
+		{
+			name: "Format2 mapping rejects omitted methods",
+			fileContent: `authorization:
+  endpoints:
+    - path: /api/v1/y
+      mappings:
+        - resources:
+            - resourceAttributes:
+                resource: pods
+                verb: get`,
+			want:       nil,
+			wantErr:    true,
+			wantErrSub: "non-empty methods",
+		},
+		{
+			name: "Format2 mapping rejects empty resources list",
+			fileContent: `authorization:
+  endpoints:
+    - path: /api/v1/z
+      mappings:
+        - methods: [get]
+          resources: []`,
+			want:       nil,
+			wantErr:    true,
+			wantErrSub: "resource rule",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -111,6 +205,12 @@ func Test_parseAuthorizationConfigFile(t *testing.T) {
 			got, err := parseAuthorizationConfigFile(filePath)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("parseAuthorizationConfigFile() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if tt.wantErr {
+				if tt.wantErrSub != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErrSub)) {
+					t.Errorf("parseAuthorizationConfigFile() error = %v, want substring %q", err, tt.wantErrSub)
+				}
 				return
 			}
 			if !reflect.DeepEqual(got, tt.want) {
