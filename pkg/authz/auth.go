@@ -30,10 +30,16 @@ import (
 
 // Config holds configuration enabling request authorization
 type Config struct {
-	Rewrites               *SubjectAccessReviewRewrites `json:"rewrites,omitempty"`
-	ResourceAttributes     *ResourceAttributes          `json:"resourceAttributes,omitempty"`
-	ResourceAttributesFile string                       `json:"-"`
-	Static                 []StaticAuthorizationConfig  `json:"static,omitempty"`
+	// Format1: query/header values for templated resourceAttributes (endpoint rules use their own rewrites).
+	Rewrites *SubjectAccessReviewRewrites `json:"rewrites,omitempty"`
+	// Format1: SAR resource fields; nil authorizes the request URL as a non-resource path.
+	ResourceAttributes *ResourceAttributes `json:"resourceAttributes,omitempty"`
+	// Not loaded from YAML (json:"-"); unused by kube-rbac-proxy.
+	ResourceAttributesFile string `json:"-"`
+	// Optional allow-list checked before SubjectAccessReview.
+	Static []StaticAuthorizationConfig `json:"static,omitempty"`
+	// Format2: path/method-scoped SAR rules; when the path matches, these replace Format1 for that request.
+	Endpoints []Endpoint `json:"endpoints,omitempty"`
 }
 
 // SubjectAccessReviewRewrites describes how SubjectAccessReview may be

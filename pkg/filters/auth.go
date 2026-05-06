@@ -16,6 +16,7 @@ limitations under the License.
 package filters
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -29,6 +30,9 @@ import (
 	"k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/klog/v2"
 )
+
+// authorizationBadRequestBody is returned for 400 responses from attribute building; details stay in logs only.
+const authorizationBadRequestBody = "Bad Request. The request or configuration is malformed."
 
 func WithAuthentication(
 	authReq authenticator.Request,
@@ -59,7 +63,7 @@ func WithAuthentication(
 }
 
 func WithAuthorization(
-	authz authorizer.Authorizer,
+	az authorizer.Authorizer,
 	cfg *authz.Config,
 	handler http.HandlerFunc,
 ) http.HandlerFunc {
@@ -75,21 +79,29 @@ func WithAuthorization(
 		}
 
 		// Get authorization attributes
-		allAttrs := getRequestAttributes(u, req)
+		allAttrs, err := getRequestAttributes(u, req)
+		if err != nil {
+			if errors.Is(err, authz.ErrEndpointMethodNotAllowed) {
+				klog.V(2).Infof("Forbidden (HTTP method not permitted for matched Format2 endpoint): %v", err)
+				http.Error(w, "HTTP method is not permitted for this endpoint", http.StatusForbidden)
+				return
+			}
+			klog.V(2).Infof("Bad Request: %v", err)
+			http.Error(w, authorizationBadRequestBody, http.StatusBadRequest)
+			return
+		}
 		if len(allAttrs) == 0 {
-			msg := "Bad Request. The request or configuration is malformed."
-			klog.V(2).Info(msg)
-			http.Error(w, msg, http.StatusBadRequest)
+			klog.V(2).Info(authorizationBadRequestBody + " (no attributes generated)")
+			http.Error(w, authorizationBadRequestBody, http.StatusBadRequest)
 			return
 		}
 
 		for _, attrs := range allAttrs {
 			// Authorize
-			authorized, reason, err := authz.Authorize(req.Context(), attrs)
+			authorized, reason, err := az.Authorize(req.Context(), attrs)
 			if err != nil {
-				msg := fmt.Sprintf("Authorization error (user=%s, verb=%s, resource=%s, subresource=%s)", u.GetName(), attrs.GetVerb(), attrs.GetResource(), attrs.GetSubresource())
-				klog.Errorf("%s: %s", msg, err)
-				http.Error(w, msg, http.StatusInternalServerError)
+				klog.Errorf("Authorization error (user=%s, verb=%s, resource=%s, subresource=%s): %v", u.GetName(), attrs.GetVerb(), attrs.GetResource(), attrs.GetSubresource(), err)
+				http.Error(w, "error during authorization", http.StatusInternalServerError)
 				return
 			}
 			if authorized != authorizer.DecisionAllow {

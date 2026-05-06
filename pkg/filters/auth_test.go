@@ -178,9 +178,61 @@ func TestWithAuthorization(t *testing.T) {
 			cfg:    &authz.Config{},
 			status: http.StatusOK,
 		},
+		{
+			name: "endpoint rule missing required header returns 400",
+			req: func() *http.Request {
+				r := httptest.NewRequest(http.MethodPost, "/api/v1/evaluations/jobs/j1/events", nil)
+				return r.WithContext(request.WithUser(r.Context(), &user.DefaultInfo{}))
+			}(),
+			authz: approver{},
+			cfg: &authz.Config{
+				Endpoints: []authz.Endpoint{{
+					Path: "/api/v1/evaluations/jobs/*/events",
+					Mappings: []authz.EndpointMapping{{
+						Methods: []string{"post"},
+						Resources: []authz.EndpointResourceRule{{
+							Rewrites: authz.SubjectAccessReviewRewrites{
+								ByHTTPHeader: &authz.HTTPHeaderRewriteConfig{Name: "X-Tenant"},
+							},
+							ResourceAttributes: authz.ResourceAttributes{
+								Namespace: "{{.FromHeader}}",
+								Verb:      "create",
+							},
+						}},
+					}},
+				}},
+			},
+			status: http.StatusBadRequest,
+		},
+		{
+			name: "Format2 path matched but HTTP method not in mappings returns 403",
+			req: func() *http.Request {
+				r := httptest.NewRequest(http.MethodGet, "/api/v1/evaluations/jobs/j1/events", nil)
+				return r.WithContext(request.WithUser(r.Context(), &user.DefaultInfo{}))
+			}(),
+			authz: approver{},
+			cfg: &authz.Config{
+				Endpoints: []authz.Endpoint{{
+					Path: "/api/v1/evaluations/jobs/*/events",
+					Mappings: []authz.EndpointMapping{{
+						Methods: []string{"post"},
+						Resources: []authz.EndpointResourceRule{{
+							ResourceAttributes: authz.ResourceAttributes{
+								Namespace: "{{.FromHeader}}",
+								Verb:      "create",
+							},
+						}},
+					}},
+				}},
+			},
+			status: http.StatusForbidden,
+		},
 	} {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.cfg != nil {
+				tt.cfg.PrepareEndpoints()
+			}
 			rec := httptest.NewRecorder()
 			filters.WithAuthorization(
 				tt.authz,
