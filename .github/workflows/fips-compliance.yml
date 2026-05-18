@@ -1,0 +1,54 @@
+name: FIPS Compliance Check
+
+on:
+  pull_request:
+    branches: [master, main]
+
+concurrency:
+  group: fips-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fips-compliance:
+    name: FIPS compliance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build FIPS-compliant image
+        run: |
+          docker build -f Dockerfile.redhat \
+            -t kube-rbac-proxy:fips-test \
+            --build-arg VERSION=test \
+            --build-arg BUILDPLATFORM=linux/amd64 \
+            .
+
+      - name: Setup Go for check-payload
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: stable
+
+      - name: Clone and build check-payload tool
+        run: |
+          git clone https://github.com/openshift/check-payload.git /tmp/check-payload
+          cd /tmp/check-payload
+          make
+
+      - name: Extract container filesystem for scanning
+        run: |
+          mkdir -p /tmp/container-fs
+          docker create --name temp-fips-container kube-rbac-proxy:fips-test
+          docker export temp-fips-container | tar -x -C /tmp/container-fs
+          docker rm temp-fips-container
+
+      - name: Run FIPS compliance check
+        run: |
+          /tmp/check-payload/check-payload scan local --path /tmp/container-fs
+
