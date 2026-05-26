@@ -12,7 +12,7 @@ ARG TARGETARCH
 RUN GOOS=linux VERSION=$(cat VERSION) GOARCH=${TARGETARCH} make build && \
     cp _output/kube-rbac-proxy-linux-${TARGETARCH} _output/kube-rbac-proxy
 
-FROM registry.redhat.io/ubi9/ubi-minimal@sha256:457cb288730d29e2a59823b3b56341466fa94f3158e399c5ab2c4409fee0c562
+FROM registry.redhat.io/ubi9/ubi-minimal@sha256:d1578df342655d728de7c0850a2bea216193143486891362bf3e7793feedf6a8
 
 ARG FROM_DIRECTORY=/go/src/github.com/brancz/kube-rbac-proxy
 COPY --from=builder ${FROM_DIRECTORY}/_output/kube-rbac-proxy  /usr/bin/kube-rbac-proxy
