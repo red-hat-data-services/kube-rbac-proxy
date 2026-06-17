@@ -30,6 +30,12 @@ func initTransport(upstreamCAPool *x509.CertPool, upstreamClientCertPath, upstre
 		// Create transport based on DefaultTransport for timeout support
 		transport := http.DefaultTransport.(*http.Transport).Clone()
 		transport.ResponseHeaderTimeout = timeout
+		if transport.TLSClientConfig == nil {
+			transport.TLSClientConfig = &tls.Config{
+				MinVersion: tls.VersionTLS12,
+			}
+		}
+		transport.TLSClientConfig.NextProtos = []string{"h2", "http/1.1"}
 		return transport, nil
 	}
 
@@ -44,7 +50,8 @@ func initTransport(upstreamCAPool *x509.CertPool, upstreamClientCertPath, upstre
 
 	// http.Transport sourced from go 1.10.7
 	transport := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
+		ForceAttemptHTTP2: true,
+		Proxy:             http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
@@ -56,9 +63,12 @@ func initTransport(upstreamCAPool *x509.CertPool, upstreamClientCertPath, upstre
 		ExpectContinueTimeout: 1 * time.Second,
 		ResponseHeaderTimeout: timeout,
 		TLSClientConfig: &tls.Config{
-			RootCAs: upstreamCAPool,
+			RootCAs:    upstreamCAPool,
+			MinVersion: tls.VersionTLS12,
 		},
 	}
+
+	transport.TLSClientConfig.NextProtos = []string{"h2", "http/1.1"}
 
 	if certKeyPair.Certificate != nil {
 		transport.TLSClientConfig.Certificates = []tls.Certificate{certKeyPair}
