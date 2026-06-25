@@ -62,7 +62,6 @@ Kube-rbac-proxy flags:
       --auth-token-audiences strings                Comma-separated list of token audiences to accept. By default a token does not have to have any specific audience. It is recommended to set a specific audience.
       --client-ca-file string                       If set, any request presenting a client certificate signed by one of the authorities in the client-ca-file is authenticated with an identity corresponding to the CommonName of the client certificate.
       --config-file string                          Configuration file to configure kube-rbac-proxy.
-      --http2-disable                               Disable HTTP/2 support
       --http2-max-concurrent-streams uint32         The maximum number of concurrent streams per HTTP/2 connection. (default 100)
       --http2-max-size uint32                       The maximum number of bytes that the server will accept for frame size and buffer per stream in a HTTP/2 request. (default 262144)
       --ignore-paths strings                        Comma-separated list of paths against which kube-rbac-proxy pattern-matches the incoming request. If the requst matches, it will proxy the request without performing an authentication or authorization check. Cannot be used with --allow-paths.
