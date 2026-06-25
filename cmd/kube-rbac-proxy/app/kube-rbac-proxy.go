@@ -136,7 +136,6 @@ type completedProxyRunOptions struct {
 	upstreamForceH2C bool
 	upstreamCABundle *x509.CertPool
 
-	http2Disable bool
 	http2Options *http2.Server
 
 	auth *proxy.Config
@@ -216,7 +215,6 @@ func Complete(o *options.ProxyRunOptions) (*completedProxyRunOptions, error) {
 		return nil, fmt.Errorf("failed to instantiate Kubernetes client: %w", err)
 	}
 
-	completed.http2Disable = o.HTTP2Disable
 	completed.http2Options = &http2.Server{
 		IdleTimeout:                  90 * time.Second,
 		MaxConcurrentStreams:         o.HTTP2MaxConcurrentStreams,
@@ -397,22 +395,10 @@ func Run(cfg *completedProxyRunOptions) error {
 			srv.TLSConfig.MinVersion = version
 			srv.TLSConfig.ClientAuth = tls.RequestClientCert
 
-			if cfg.http2Disable {
-				// HTTP/2 is temporarily disabled due to CVE-2023-44487
-				// Programs that must disable HTTP/2 can do so by setting
-				// Transport.TLSNextProto (for clients) or Server.TLSNextProto
-				// (for servers) to a non-nil, empty map.
-				// https://pkg.go.dev/net/http
-				srv.TLSNextProto = make(map[string]func(*http.Server, *tls.Conn, http.Handler))
-
-				// For reference:
-				// https://github.com/kubernetes/kubernetes/blob/de054fbf9422d778568946de21a48c7330a6c1b7/staging/src/k8s.io/apiserver/pkg/server/secure_serving.go#L55-L59
-				srv.TLSConfig.NextProtos = []string{"http/1.1"}
-			} else {
-				if err := http2.ConfigureServer(srv, cfg.http2Options); err != nil {
-					return fmt.Errorf("failed to configure http2 server: %w", err)
-				}
+			if err := http2.ConfigureServer(srv, cfg.http2Options); err != nil {
+				return fmt.Errorf("failed to configure http2 server: %w", err)
 			}
+			srv.TLSConfig.NextProtos = []string{"h2", "http/1.1"}
 
 			gr.Add(func() error {
 				klog.Infof("Starting TCP socket on %v", cfg.secureListenAddress)
@@ -440,21 +426,10 @@ func Run(cfg *completedProxyRunOptions) error {
 					TLSConfig: srv.TLSConfig.Clone(),
 				}
 
-				if cfg.http2Disable {
-					// HTTP/2 is temporarily disabled due to CVE-2023-44487
-					// Programs that must disable HTTP/2 can do so by setting
-					// Transport.TLSNextProto (for clients) or Server.TLSNextProto
-					// (for servers) to a non-nil, empty map.
-					// https://pkg.go.dev/net/http
-					srv.TLSNextProto = make(map[string]func(*http.Server, *tls.Conn, http.Handler))
-					// For reference:
-					// https://github.com/kubernetes/kubernetes/blob/de054fbf9422d778568946de21a48c7330a6c1b7/staging/src/k8s.io/apiserver/pkg/server/secure_serving.go#L55-L59
-					srv.TLSConfig.NextProtos = []string{"http/1.1"}
-				} else {
-					if err := http2.ConfigureServer(proxyEndpointsSrv, cfg.http2Options); err != nil {
-						return fmt.Errorf("failed to configure http2 server: %w", err)
-					}
+				if err := http2.ConfigureServer(proxyEndpointsSrv, cfg.http2Options); err != nil {
+					return fmt.Errorf("failed to configure http2 server: %w", err)
 				}
+				proxyEndpointsSrv.TLSConfig.NextProtos = []string{"h2", "http/1.1"}
 
 				gr.Add(func() error {
 					host, _, err := net.SplitHostPort(cfg.secureListenAddress)
@@ -471,7 +446,7 @@ func Run(cfg *completedProxyRunOptions) error {
 					defer proxyListener.Close()
 
 					klog.Infof("Listening securely on %v for proxy endpoints", endpointsAddr)
-					tlsListener := tls.NewListener(proxyListener, srv.TLSConfig)
+					tlsListener := tls.NewListener(proxyListener, proxyEndpointsSrv.TLSConfig)
 					return proxyEndpointsSrv.Serve(tlsListener)
 				}, func(err error) {
 					if err := proxyEndpointsSrv.Shutdown(context.Background()); err != nil {
@@ -483,11 +458,8 @@ func Run(cfg *completedProxyRunOptions) error {
 	}
 	{
 		if cfg.insecureListenAddress != "" {
-			srv := &http.Server{}
-			if cfg.http2Disable {
-				srv.Handler = mux
-			} else {
-				srv.Handler = h2c.NewHandler(mux, cfg.http2Options)
+			srv := &http.Server{
+				Handler: h2c.NewHandler(mux, cfg.http2Options),
 			}
 
 			l, err := net.Listen("tcp", cfg.insecureListenAddress)
