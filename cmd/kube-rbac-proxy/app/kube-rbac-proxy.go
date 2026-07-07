@@ -381,7 +381,7 @@ func Run(cfg *completedProxyRunOptions) error {
 				})
 			}
 
-			version, err := k8sapiflag.TLSVersion(cfg.tls.MinVersion)
+			version, err := k8sapiflag.TLSVersion(normalizeTLSVersion(cfg.tls.MinVersion))
 			if err != nil {
 				return fmt.Errorf("TLS version invalid: %w", err)
 			}
@@ -541,4 +541,21 @@ func parseAuthorizationConfigFile(filePath string) (*authz.Config, error) {
 	}
 
 	return configFile.AuthorizationConfig, nil
+}
+
+// normalizeTLSVersion accepts both kube-auth-proxy style ("TLS1.2", "TLS1.3")
+// and k8s component-base style ("VersionTLS12", "VersionTLS13") version names.
+func normalizeTLSVersion(input string) string {
+	switch input {
+	case "TLS1.0":
+		return "VersionTLS10"
+	case "TLS1.1":
+		return "VersionTLS11"
+	case "TLS1.2":
+		return "VersionTLS12"
+	case "TLS1.3":
+		return "VersionTLS13"
+	default:
+		return input
+	}
 }
