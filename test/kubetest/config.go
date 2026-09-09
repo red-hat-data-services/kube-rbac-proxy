@@ -255,10 +255,10 @@ func (c *KRPTestConfig) Launch(client kubernetes.Interface) Action {
 		if err == nil {
 			ctx.AddCleanUp(func() error {
 				if err := client.AppsV1().Deployments(ctx.Namespace).Delete(context.TODO(), finalDeployment.Name, metav1.DeleteOptions{}); err != nil {
-					return err
+					return fmt.Errorf("delete deployment %s/%s: %w", ctx.Namespace, finalDeployment.Name, err)
 				}
-				// TODO: wire proper context below
-				return wait.PollUntilContextTimeout(context.TODO(), 1*time.Second, 15*time.Second, true, func(waitCtx context.Context) (bool, error) {
+				// Allow the default 30-second pod termination grace period plus controller delays.
+				err := wait.PollUntilContextTimeout(context.Background(), time.Second, time.Minute, true, func(waitCtx context.Context) (bool, error) {
 					podList, err := client.CoreV1().Pods(ctx.Namespace).List(waitCtx, metav1.ListOptions{
 						LabelSelector: "app=kube-rbac-proxy",
 					})
@@ -267,6 +267,10 @@ func (c *KRPTestConfig) Launch(client kubernetes.Interface) Action {
 					}
 					return false, err
 				})
+				if err != nil {
+					return fmt.Errorf("wait for pods of deployment %s/%s to terminate: %w", ctx.Namespace, finalDeployment.Name, err)
+				}
+				return nil
 			})
 		}
 

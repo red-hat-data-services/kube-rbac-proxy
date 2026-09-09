@@ -55,15 +55,15 @@ func (s Scenario) Run(t *testing.T) bool {
 		Namespace: "default",
 	}
 
-	defer func(ctx *ScenarioContext) {
-		for _, f := range ctx.CleanUp {
-			if err := f(); err != nil {
-				panic(err)
-			}
-		}
-	}(ctx)
-
 	return t.Run(s.Name, func(t *testing.T) {
+		t.Cleanup(func() {
+			for i, f := range ctx.CleanUp {
+				if err := f(); err != nil {
+					t.Errorf("cleanup action %d failed: %v", i+1, err)
+				}
+			}
+		})
+
 		if s.Given != nil {
 			if err := s.Given(ctx); err != nil {
 				t.Fatalf("failed to create given setup: %v", err)

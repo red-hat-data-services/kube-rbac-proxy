@@ -100,7 +100,11 @@ func testBasics(client kubernetes.Interface) kubetest.TestSuite {
 // slowUpstreamListenPy is a minimal HTTP server on 127.0.0.1:8081 that waits
 // before responding (for upstream-timeout e2e coverage).
 const slowUpstreamListenPy = `from http.server import HTTPServer, BaseHTTPRequestHandler
+import signal
 import time
+def terminate(signum, frame):
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, terminate)
 class H(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
@@ -109,7 +113,8 @@ class H(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"ok")
-HTTPServer(("127.0.0.1", 8081), H).serve_forever()
+with HTTPServer(("127.0.0.1", 8081), H) as server:
+    server.serve_forever()
 `
 
 func testUpstreamTimeout(client kubernetes.Interface) kubetest.TestSuite {
