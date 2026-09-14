@@ -20,6 +20,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -403,5 +404,134 @@ func TestCollectRewriteParams(t *testing.T) {
 	params := CollectRewriteParams(req, rw)
 	if len(params) != 3 {
 		t.Fatalf("params=%v want len 3", params)
+	}
+}
+
+func TestMatchEndpoint_CapturesNamedSegments(t *testing.T) {
+	cases := []struct {
+		pattern string
+		path    string
+		want    map[string]string
+	}{
+		{"/api/v1/tenants/{tenant}/metrics", "/api/v1/tenants/tenant-a/metrics", map[string]string{"tenant": "tenant-a"}},
+		{"/api/{version}/tenants/{tenant}/jobs/{job}", "/api/v2/tenants/my-ns/jobs/job-1", map[string]string{"version": "v2", "tenant": "my-ns", "job": "job-1"}},
+		{"/api/v1/jobs/*/{id}", "/api/v1/jobs/queue/123", map[string]string{"id": "123"}},
+		{"/api/v1/jobs", "/api/v1/jobs", map[string]string{}},
+	}
+	for _, c := range cases {
+		ep := Endpoint{Path: c.pattern, PathParts: strings.Split(c.pattern, "/")}
+		if !MatchEndpoint(c.path, ep) {
+			t.Errorf("MatchEndpoint(%q, %q): expected match", c.path, c.pattern)
+			continue
+		}
+		captured := extractPathCaptures(c.path, ep)
+		if !reflect.DeepEqual(captured, c.want) {
+			t.Errorf("extractPathCaptures(%q, %q) captured=%v, want %v", c.path, c.pattern, captured, c.want)
+		}
+	}
+}
+
+func TestEndpointAttributesFromRequest_NamedPathCaptures(t *testing.T) {
+	cfg := &Config{
+		Endpoints: []Endpoint{{
+			Path: "/api/v1/tenants/{tenant}/reports/{report}",
+			Mappings: []EndpointMapping{{
+				Methods: []string{"get"},
+				Resources: []EndpointResourceRule{{
+					ResourceAttributes: ResourceAttributes{
+						Namespace: "{{ index .PathParams \"tenant\" }}",
+						Name:      "{{ index .PathParams \"report\" }}",
+						APIGroup:  "reports.example.io",
+						Resource:  "reports",
+					},
+				}},
+			}},
+		}},
+	}
+	cfg.PrepareEndpoints()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/tenants/tenant-a/reports/report-17", nil)
+	attrs, matched, err := EndpointAttributesFromRequest(testUser("u"), req, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !matched {
+		t.Fatal("expected path to match")
+	}
+	if len(attrs) != 1 {
+		t.Fatalf("len(attrs)=%d, want 1", len(attrs))
+	}
+	rec := attrs[0].(authorizer.AttributesRecord)
+	if rec.Namespace != "tenant-a" || rec.Name != "report-17" {
+		t.Fatalf("unexpected resource identity: namespace=%q name=%q", rec.Namespace, rec.Name)
+	}
+	if rec.APIGroup != "reports.example.io" || rec.Resource != "reports" {
+		t.Fatalf("unexpected resource: apiGroup=%q resource=%q", rec.APIGroup, rec.Resource)
+	}
+}
+
+func TestEndpointAttributesFromRequest_PathDoesNotPopulateValue(t *testing.T) {
+	cfg := &Config{
+		Endpoints: []Endpoint{{
+			Path: "/api/v1/namespaces/{namespace}/pods",
+			Mappings: []EndpointMapping{{
+				Methods: []string{"get"},
+				Resources: []EndpointResourceRule{{
+					ResourceAttributes: ResourceAttributes{
+						Namespace: "{{.Value}}",
+						Resource:  "pods",
+					},
+				}},
+			}},
+		}},
+	}
+	cfg.PrepareEndpoints()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/namespaces/kube-system/pods", nil)
+	attrs, matched, err := EndpointAttributesFromRequest(testUser("u"), req, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !matched {
+		t.Fatal("expected match")
+	}
+	rec := attrs[0].(authorizer.AttributesRecord)
+	if rec.Namespace != "" {
+		t.Fatalf("Namespace=%q, want empty because .Value is reserved for rewrites", rec.Namespace)
+	}
+}
+
+func TestEndpointAttributesFromRequest_LegacyWildcardHeaderRewrite(t *testing.T) {
+	// Legacy '*' segments still match, while the header supplies .Value for the SAR template.
+	cfg := &Config{
+		Endpoints: []Endpoint{{
+			Path: "/api/v1/tenants/*/events",
+			Mappings: []EndpointMapping{{
+				Methods: []string{"post"},
+				Resources: []EndpointResourceRule{{
+					Rewrites: SubjectAccessReviewRewrites{
+						ByHTTPHeader: &HTTPHeaderRewriteConfig{Name: "X-Tenant"},
+					},
+					ResourceAttributes: ResourceAttributes{
+						Namespace: "{{.Value}}",
+						Resource:  "events",
+						Verb:      "create",
+					},
+				}},
+			}},
+		}},
+	}
+	cfg.PrepareEndpoints()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants/path-ns/events", nil)
+	req.Header.Set("X-Tenant", "header-ns")
+
+	attrs, _, err := EndpointAttributesFromRequest(testUser("u"), req, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := attrs[0].(authorizer.AttributesRecord)
+	if rec.Namespace != "header-ns" {
+		t.Fatalf("Namespace=%q, want %q (legacy wildcard must not replace header .Value)", rec.Namespace, "header-ns")
 	}
 }
