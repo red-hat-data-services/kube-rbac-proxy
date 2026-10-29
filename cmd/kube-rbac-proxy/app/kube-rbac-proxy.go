@@ -142,6 +142,9 @@ type completedProxyRunOptions struct {
 	upstreamForceH2C bool
 	upstreamCABundle *x509.CertPool
 
+	readHeaderTimeout time.Duration
+	idleTimeout       time.Duration
+
 	http2Options *http2.Server
 
 	auth        *proxy.Config
@@ -165,6 +168,8 @@ func Complete(o *options.ProxyRunOptions) (*completedProxyRunOptions, error) {
 		proxyEndpointsPort:    o.ProxyEndpointsPort,
 		upstreamTimeout:       o.UpstreamTimeout,
 		upstreamForceH2C:      o.UpstreamForceH2C,
+		readHeaderTimeout:     o.ReadHeaderTimeout,
+		idleTimeout:           o.IdleTimeout,
 
 		allowPaths:  o.AllowPaths,
 		ignorePaths: o.IgnorePaths,
@@ -240,8 +245,17 @@ func Complete(o *options.ProxyRunOptions) (*completedProxyRunOptions, error) {
 		return nil, fmt.Errorf("failed to instantiate Kubernetes client: %w", err)
 	}
 
+	// --idle-timeout <= 0 means disabled. A negative sentinel is used
+	// instead of zero because http2.ConfigureServer replaces a zero
+	// HTTP/2 IdleTimeout with the HTTP/1 server's IdleTimeout (falling
+	// back to its ReadTimeout), which would silently re-enable a bound
+	// the caller explicitly opted out of.
+	idleTimeout := o.IdleTimeout
+	if idleTimeout <= 0 {
+		idleTimeout = -1
+	}
 	completed.http2Options = &http2.Server{
-		IdleTimeout:                  90 * time.Second,
+		IdleTimeout:                  idleTimeout,
 		MaxConcurrentStreams:         o.HTTP2MaxConcurrentStreams,
 		MaxReadFrameSize:             o.HTTP2MaxSize,
 		MaxUploadBufferPerStream:     int32(o.HTTP2MaxSize),
@@ -349,10 +363,12 @@ func Run(cfg *completedProxyRunOptions) error {
 	var gr run.Group
 	{
 		if cfg.secureListenAddress != "" {
-			srv := &http.Server{
-				Handler:   mux,
-				TLSConfig: &tls.Config{},
-			}
+			// TLS settings are projected by the caller (the component operator)
+			// from the resolved cluster TLS profile via --tls-min-version,
+			// --tls-cipher-suites and --tls-curve-preferences. The config
+			// passed here is empty and fully populated by applyTLSConfig
+			// before any listener starts.
+			srv := newTLSServer(mux, &tls.Config{}, cfg.readHeaderTimeout, cfg.idleTimeout, false)
 
 			if cfg.tls.CertFile == "" && cfg.tls.KeyFile == "" {
 				klog.Info("Generating self signed cert as no cert is provided")
@@ -418,10 +434,11 @@ func Run(cfg *completedProxyRunOptions) error {
 				proxyEndpointsMux := http.NewServeMux()
 				proxyEndpointsMux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
 
-				proxyEndpointsSrv := &http.Server{
-					Handler:   proxyEndpointsMux,
-					TLSConfig: srv.TLSConfig.Clone(),
-				}
+				// Serves /healthz with a clone of the fully populated main
+				// server config (see applyTLSConfig above): same minimum
+				// version, cipher suites and curve preferences. Bounded
+				// reads are safe here: only bodyless probes.
+				proxyEndpointsSrv := newTLSServer(proxyEndpointsMux, srv.TLSConfig.Clone(), cfg.readHeaderTimeout, cfg.idleTimeout, true)
 
 				if err := http2.ConfigureServer(proxyEndpointsSrv, cfg.http2Options); err != nil {
 					return fmt.Errorf("failed to configure http2 server: %w", err)
@@ -455,8 +472,14 @@ func Run(cfg *completedProxyRunOptions) error {
 	}
 	{
 		if cfg.insecureListenAddress != "" {
+			// Same read bounds as the main proxy: header and idle
+			// timeouts are the caller's flags; the request-body phase is
+			// bounded by the enforced --upstream-timeout, so no blanket
+			// ReadTimeout.
 			srv := &http.Server{
-				Handler: h2c.NewHandler(mux, cfg.http2Options),
+				Handler:           h2c.NewHandler(mux, cfg.http2Options),
+				ReadHeaderTimeout: cfg.readHeaderTimeout,
+				IdleTimeout:       cfg.idleTimeout,
 			}
 
 			l, err := net.Listen("tcp", cfg.insecureListenAddress)
@@ -586,6 +609,44 @@ func buildRequestHandler(proxyHandler, protectedHandler http.HandlerFunc, allowP
 	})
 
 	return filters.WithAllowPaths(allowPaths, handler)
+}
+
+// newTLSServer builds the TLS servers used by the proxy. TLS settings are
+// projected by the caller (the component operator) from the resolved cluster
+// TLS profile via --tls-min-version, --tls-cipher-suites and
+// --tls-curve-preferences; tlsCfg must be fully populated (see applyTLSConfig)
+// before any listener starts.
+//
+// Read bounds are caller-configurable flags: readHeader bounds header reads
+// and idle bounds keep-alive idleness; a value of 0 or negative disables
+// either. boundedRead additionally applies readHeader as a full ReadTimeout
+// for servers that only serve bodyless probes. The main proxy deliberately
+// has no blanket ReadTimeout: its request-body phase is bounded by the
+// enforced --upstream-timeout (see upstreamTimeoutRoundTripper in
+// transport.go), which is the caller's policy decision, and a fixed read
+// deadline would cut off legitimate large or slow request bodies.
+func newTLSServer(handler http.Handler, tlsCfg *tls.Config, readHeader, idle time.Duration, boundedRead bool) *http.Server {
+	// --idle-timeout <= 0 means disabled. A negative sentinel is used
+	// instead of zero because net/http falls back to ReadTimeout when
+	// IdleTimeout is zero, which would give the probe server an implicit
+	// idle bound equal to its full-read bound; negative values disable
+	// the idle bound in both HTTP/1 and HTTP/2 (via ConfigureServer).
+	if idle <= 0 {
+		idle = -1
+	}
+	srv := &http.Server{ // nosemgrep: go-http-server-tls-override
+		Handler:   handler,
+		TLSConfig: tlsCfg,
+		// Bounds header reads to mitigate slowloris-style resource
+		// exhaustion; the default matches the upstream client's
+		// TLSHandshakeTimeout in transport.go.
+		ReadHeaderTimeout: readHeader,
+		IdleTimeout:       idle,
+	}
+	if boundedRead {
+		srv.ReadTimeout = readHeader
+	}
+	return srv
 }
 
 func applyTLSConfig(config *tls.Config, options *options.TLSConfig) error {
