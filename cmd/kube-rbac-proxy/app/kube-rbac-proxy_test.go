@@ -19,6 +19,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -33,6 +34,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/net/http2"
 
 	"github.com/brancz/kube-rbac-proxy/cmd/kube-rbac-proxy/app/options"
 	"github.com/brancz/kube-rbac-proxy/pkg/audit"
@@ -1034,5 +1037,180 @@ func TestBuildProtectedHandlerAuditsFormat2Ownership(t *testing.T) {
 				t.Errorf("resources mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+func TestNewTLSServerBoundsReadsForProbeServerOnly(t *testing.T) {
+	handler := http.NewServeMux()
+	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	const readHeader = 10 * time.Second
+	const idle = 60 * time.Second
+
+	main := newTLSServer(handler, tlsCfg, readHeader, idle, false)
+	if main.ReadHeaderTimeout != readHeader {
+		t.Fatalf("main proxy ReadHeaderTimeout = %v, want %v", main.ReadHeaderTimeout, readHeader)
+	}
+	if main.IdleTimeout != idle {
+		t.Fatalf("main proxy IdleTimeout = %v, want %v", main.IdleTimeout, idle)
+	}
+	if main.ReadTimeout != 0 {
+		t.Fatalf("main proxy ReadTimeout = %v, want 0: request bodies are bounded by the enforced --upstream-timeout, and a fixed read deadline would cut off legitimate large or slow request bodies", main.ReadTimeout)
+	}
+	if main.TLSConfig != tlsCfg {
+		t.Fatal("main proxy TLSConfig not passed through")
+	}
+
+	probe := newTLSServer(handler, tlsCfg.Clone(), readHeader, idle, true)
+	if probe.ReadHeaderTimeout != readHeader {
+		t.Fatalf("probe server ReadHeaderTimeout = %v, want %v", probe.ReadHeaderTimeout, readHeader)
+	}
+	if probe.IdleTimeout != idle {
+		t.Fatalf("probe server IdleTimeout = %v, want %v", probe.IdleTimeout, idle)
+	}
+	// The probe server only serves bodyless /healthz requests, so the whole
+	// read is bounded; do not "fix" the main proxy to match.
+	if probe.ReadTimeout != readHeader {
+		t.Fatalf("probe server ReadTimeout = %v, want %v", probe.ReadTimeout, readHeader)
+	}
+	if probe.Handler == nil {
+		t.Fatal("probe server handler not passed through")
+	}
+
+	// Zero values disable the bounds, restoring upstream behavior for
+	// callers that opt out. IdleTimeout uses a negative sentinel rather
+	// than zero because net/http would otherwise fall back to ReadTimeout
+	// for the HTTP/1 idle bound, re-enabling a bound the caller opted out
+	// of on the probe server.
+	disabled := newTLSServer(handler, tlsCfg, 0, 0, false)
+	if disabled.ReadHeaderTimeout != 0 {
+		t.Fatal("zero read-header timeout must pass through as disabled")
+	}
+	if disabled.IdleTimeout >= 0 {
+		t.Fatalf("zero idle timeout must disable the idle bound, got %v", disabled.IdleTimeout)
+	}
+	probeDisabled := newTLSServer(handler, tlsCfg, 10*time.Second, 0, true)
+	if probeDisabled.ReadTimeout != 10*time.Second {
+		t.Fatalf("probe server ReadTimeout = %v, want 10s", probeDisabled.ReadTimeout)
+	}
+	if probeDisabled.IdleTimeout >= 0 {
+		t.Fatalf("probe server idle bound must stay disabled with zero --idle-timeout, got %v", probeDisabled.IdleTimeout)
+	}
+
+	// A negative idle input is treated the same as zero: disabled.
+	negativeIdle := newTLSServer(handler, tlsCfg, 10*time.Second, -time.Second, false)
+	if negativeIdle.IdleTimeout >= 0 {
+		t.Fatalf("negative idle input must disable the idle bound, got %v", negativeIdle.IdleTimeout)
+	}
+	if negativeIdle.ReadTimeout != 0 {
+		t.Fatalf("main proxy ReadTimeout = %v, want 0", negativeIdle.ReadTimeout)
+	}
+
+	// A zero read-header timeout disables the probe server's full-read
+	// bound as well, restoring fully unbounded reads for callers that
+	// opt out of every bound.
+	probeNoHeader := newTLSServer(handler, tlsCfg, 0, 60*time.Second, true)
+	if probeNoHeader.ReadTimeout != 0 {
+		t.Fatalf("probe server ReadTimeout = %v, want 0 with zero read-header timeout", probeNoHeader.ReadTimeout)
+	}
+	if probeNoHeader.ReadHeaderTimeout != 0 {
+		t.Fatalf("probe server ReadHeaderTimeout = %v, want 0", probeNoHeader.ReadHeaderTimeout)
+	}
+	if probeNoHeader.IdleTimeout != 60*time.Second {
+		t.Fatalf("probe server IdleTimeout = %v, want 60s", probeNoHeader.IdleTimeout)
+	}
+}
+
+func TestCompleteWiresIdleTimeoutIntoHTTP2Options(t *testing.T) {
+	// Complete instantiates a Kubernetes clientset; a minimal kubeconfig
+	// is enough since construction never dials the API server.
+	kubeconfig := filepath.Join(t.TempDir(), "kubeconfig")
+	if err := os.WriteFile(kubeconfig, []byte(`apiVersion: v1
+kind: Config
+clusters: [{name: test, cluster: {server: "https://127.0.0.1:6443"}}]
+contexts: [{name: test, context: {cluster: test, user: test}}]
+current-context: test
+users: [{name: test, user: {token: test}}]
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		flag  time.Duration
+		want  time.Duration
+		label string
+	}{
+		{5 * time.Second, 5 * time.Second, "positive flag is passed through"},
+		{60 * time.Second, 60 * time.Second, "default flag is passed through"},
+		{0, -1, "zero flag disables via negative sentinel"},
+		{-time.Second, -1, "negative flag disables via negative sentinel"},
+	} {
+		o := options.NewProxyRunOptions()
+		o.IdleTimeout = tc.flag
+		o.KubeconfigLocation = kubeconfig
+		o.Upstream = "https://upstream.example.com"
+		completed, err := Complete(o)
+		if err != nil {
+			t.Fatalf("%s: Complete: %v", tc.label, err)
+		}
+		if completed.http2Options.IdleTimeout != tc.want {
+			t.Fatalf("%s: http2 IdleTimeout = %v, want %v", tc.label, completed.http2Options.IdleTimeout, tc.want)
+		}
+		// The sentinel must survive http2.ConfigureServer: a zero
+		// HTTP/2 IdleTimeout would be replaced with the HTTP/1
+		// server's value, silently re-enabling the bound.
+		h2 := &http2.Server{IdleTimeout: completed.http2Options.IdleTimeout}
+		srv := &http.Server{IdleTimeout: 0, ReadTimeout: 0}
+		if err := http2.ConfigureServer(srv, h2); err != nil {
+			t.Fatalf("%s: ConfigureServer: %v", tc.label, err)
+		}
+		if tc.want > 0 && h2.IdleTimeout != tc.want {
+			t.Fatalf("%s: ConfigureServer rewrote http2 IdleTimeout to %v", tc.label, h2.IdleTimeout)
+		}
+		if tc.want < 0 && h2.IdleTimeout >= 0 {
+			t.Fatalf("%s: disabled http2 IdleTimeout became %v after ConfigureServer", tc.label, h2.IdleTimeout)
+		}
+	}
+}
+
+func TestCompletePreservesHTTP2SizingOptions(t *testing.T) {
+	kubeconfig := filepath.Join(t.TempDir(), "kubeconfig")
+	if err := os.WriteFile(kubeconfig, []byte(`apiVersion: v1
+kind: Config
+clusters: [{name: test, cluster: {server: "https://127.0.0.1:6443"}}]
+contexts: [{name: test, context: {cluster: test, user: test}}]
+current-context: test
+users: [{name: test, user: {token: test}}]
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	o := options.NewProxyRunOptions()
+	o.KubeconfigLocation = kubeconfig
+	o.Upstream = "https://upstream.example.com"
+	o.IdleTimeout = 0
+	completed, err := Complete(o)
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if completed.http2Options.MaxConcurrentStreams != o.HTTP2MaxConcurrentStreams {
+		t.Fatalf("http2 MaxConcurrentStreams = %v, want %v", completed.http2Options.MaxConcurrentStreams, o.HTTP2MaxConcurrentStreams)
+	}
+	if completed.http2Options.MaxReadFrameSize != o.HTTP2MaxSize {
+		t.Fatalf("http2 MaxReadFrameSize = %v, want %v", completed.http2Options.MaxReadFrameSize, o.HTTP2MaxSize)
+	}
+}
+
+func TestCommandExposesServerReadTimeouts(t *testing.T) {
+	cmd := NewKubeRBACProxyCommand()
+	for name, want := range map[string]string{
+		"read-header-timeout": "10s",
+		"idle-timeout":        "1m0s",
+	} {
+		flag := cmd.Flags().Lookup(name)
+		if flag == nil {
+			t.Fatalf("flag --%s is not registered on the command", name)
+		}
+		if flag.DefValue != want {
+			t.Fatalf("--%s default = %q, want %q", name, flag.DefValue, want)
+		}
 	}
 }
