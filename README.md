@@ -65,6 +65,7 @@ Kube-rbac-proxy flags:
       --config-file string                          Configuration file to configure kube-rbac-proxy.
       --http2-max-concurrent-streams uint32         The maximum number of concurrent streams per HTTP/2 connection. (default 100)
       --http2-max-size uint32                       The maximum number of bytes that the server will accept for frame size and buffer per stream in a HTTP/2 request. (default 262144)
+      --idle-timeout duration                       Maximum duration the servers wait for the next request on a keep-alive connection. A value of 0 disables the bound. (default 1m0s)
       --ignore-paths strings                        Comma-separated list of paths against which kube-rbac-proxy pattern-matches the incoming request. If the requst matches, it will proxy the request without performing an authentication or authorization check. Cannot be used with --allow-paths.
       --insecure-listen-address string              [DEPRECATED] The address the kube-rbac-proxy HTTP server should listen on.
       --kube-api-burst int                          kube-api burst value; needed when kube-api-qps is set
@@ -79,6 +80,7 @@ Kube-rbac-proxy flags:
       --oidc-username-claim string                  Identifier of the user in JWT claim, by default set to 'email' (default "email")
       --oidc-username-prefix string                 If provided, the username will be prefixed with this value to prevent conflicts with other authentication strategies.
       --proxy-endpoints-port int                    The port to securely serve proxy-specific endpoints (such as '/healthz'). Uses the host from the '--secure-listen-address'.
+      --read-header-timeout duration                Maximum duration the servers wait for a request's headers on HTTP/1.1 connections. A value of 0 disables the bound. The proxy listeners set no fixed request-body read deadline: --upstream-timeout cancels the upstream request only when non-zero, and does not guarantee that a stalled inbound body read ends. The /healthz probe listener also applies this value as a full read deadline since it serves only bodyless probes. HTTP/2 header reads on the proxy listeners are not bounded by this flag: golang.org/x/net/http2 has no header-only deadline, and its only read deadline (http.Server.ReadTimeout) would also bound request bodies. (default 10s)
       --secure-listen-address string                The address the kube-rbac-proxy HTTPs server should listen on.
       --tls-cert-file string                        File containing the default x509 Certificate for HTTPS. (CA cert, if any, concatenated after server cert)
       --tls-cipher-suites strings                   Comma-separated list of cipher suites for the server. Values are from tls package constants (https://golang.org/pkg/crypto/tls/#pkg-constants). If omitted, the default Go cipher suites will be used

@@ -33,8 +33,10 @@ import (
 )
 
 const (
-	defaultUpstreamTimeout = 30 * time.Second
-	defaultAuthTimeout     = 30 * time.Second
+	defaultUpstreamTimeout   = 30 * time.Second
+	defaultAuthTimeout       = 30 * time.Second
+	defaultReadHeaderTimeout = 10 * time.Second
+	defaultIdleTimeout       = 60 * time.Second
 )
 
 type ProxyRunOptions struct {
@@ -46,6 +48,8 @@ type ProxyRunOptions struct {
 
 	Upstream           string
 	UpstreamTimeout    time.Duration
+	ReadHeaderTimeout  time.Duration
+	IdleTimeout        time.Duration
 	UpstreamForceH2C   bool
 	UpstreamCAFile     string
 	AuthTimeout        time.Duration
@@ -85,8 +89,10 @@ type TLSConfig struct {
 
 func NewProxyRunOptions() *ProxyRunOptions {
 	return &ProxyRunOptions{
-		UpstreamTimeout: defaultUpstreamTimeout,
-		AuthTimeout:     defaultAuthTimeout,
+		UpstreamTimeout:   defaultUpstreamTimeout,
+		ReadHeaderTimeout: defaultReadHeaderTimeout,
+		IdleTimeout:       defaultIdleTimeout,
+		AuthTimeout:       defaultAuthTimeout,
 		Auth: &proxy.Config{
 			Authentication: &authn.AuthnConfig{
 				X509:   &authn.X509Config{},
@@ -110,6 +116,8 @@ func (o *ProxyRunOptions) Flags() k8sapiflag.NamedFlagSets {
 	flagset.StringVar(&o.SecureListenAddress, "secure-listen-address", "", "The address the kube-rbac-proxy HTTPs server should listen on.")
 	flagset.StringVar(&o.Upstream, "upstream", "", "The upstream URL to proxy to once requests have successfully been authenticated and authorized.")
 	flagset.DurationVar(&o.UpstreamTimeout, "upstream-timeout", defaultUpstreamTimeout, "Maximum total time from request start through authentication, authorization, writing the upstream request, and receiving upstream response headers. A value of 0 disables the overall timeout; response-body streaming is not limited.")
+	flagset.DurationVar(&o.ReadHeaderTimeout, "read-header-timeout", defaultReadHeaderTimeout, "Maximum duration the servers wait for a request's headers on HTTP/1.1 connections. A value of 0 disables the bound. The proxy listeners set no fixed request-body read deadline: --upstream-timeout cancels the upstream request only when non-zero, and does not guarantee that a stalled inbound body read ends. The /healthz probe listener also applies this value as a full read deadline since it serves only bodyless probes. HTTP/2 header reads on the proxy listeners are not bounded by this flag: golang.org/x/net/http2 has no header-only deadline, and its only read deadline (http.Server.ReadTimeout) would also bound request bodies.")
+	flagset.DurationVar(&o.IdleTimeout, "idle-timeout", defaultIdleTimeout, "Maximum duration the servers wait for the next request on a keep-alive connection. A value of 0 disables the bound.")
 	flagset.BoolVar(&o.UpstreamForceH2C, "upstream-force-h2c", false, "Force h2c to communicate with the upstream. This is required when the upstream speaks h2c(http/2 cleartext - insecure variant of http/2) only. For example, go-grpc server in the insecure mode, such as helm's tiller w/o TLS, speaks h2c only")
 	flagset.StringVar(&o.UpstreamCAFile, "upstream-ca-file", "", "The CA the upstream uses for TLS connection. This is required when the upstream uses TLS and its own CA certificate")
 	flagset.StringVar(&o.ConfigFileName, "config-file", "", "Configuration file to configure kube-rbac-proxy.")
@@ -219,6 +227,12 @@ For more information, please go to https://github.com/brancz/kube-rbac-proxy/iss
 	}
 	if o.UpstreamTimeout < 0 {
 		errs = append(errs, fmt.Errorf("--upstream-timeout cannot be negative"))
+	}
+	if o.ReadHeaderTimeout < 0 {
+		errs = append(errs, fmt.Errorf("--read-header-timeout cannot be negative"))
+	}
+	if o.IdleTimeout < 0 {
+		errs = append(errs, fmt.Errorf("--idle-timeout cannot be negative"))
 	}
 
 	for _, pathAllowed := range o.AllowPaths {
