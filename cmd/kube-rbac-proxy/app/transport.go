@@ -169,8 +169,11 @@ func initTransport(upstreamCAPool *x509.CertPool, upstreamClientCertPath, upstre
 		}
 	}
 
-	// http.Transport sourced from go 1.10.7
-	transport := &http.Transport{
+	// Custom TLS config is required here: operator-supplied CA bundles
+	// (--upstream-ca-file) and optional mTLS client certificates for
+	// upstreams. Verification is never disabled and MinVersion is a
+	// TLS 1.2 floor, not a cap.
+	transport := &http.Transport{ // nosemgrep: go-http-client-tls-override
 		ForceAttemptHTTP2: true,
 		Proxy:             http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{

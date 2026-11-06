@@ -65,6 +65,39 @@ func TestValidateRejectsNegativeUpstreamTimeout(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsNegativeReadHeaderTimeout(t *testing.T) {
+	o := NewProxyRunOptions()
+	o.Flags()
+	o.ReadHeaderTimeout = -time.Second
+
+	err := o.Validate()
+	if err == nil || !strings.Contains(err.Error(), "--read-header-timeout cannot be negative") {
+		t.Fatalf("Validate() error = %v, want negative read-header timeout error", err)
+	}
+}
+
+func TestValidateRejectsNegativeIdleTimeout(t *testing.T) {
+	o := NewProxyRunOptions()
+	o.Flags()
+	o.IdleTimeout = -time.Second
+
+	err := o.Validate()
+	if err == nil || !strings.Contains(err.Error(), "--idle-timeout cannot be negative") {
+		t.Fatalf("Validate() error = %v, want negative idle timeout error", err)
+	}
+}
+
+func TestValidateAllowsZeroServerReadTimeouts(t *testing.T) {
+	o := NewProxyRunOptions()
+	o.Flags()
+	o.ReadHeaderTimeout = 0
+	o.IdleTimeout = 0
+
+	if err := o.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want zero server read timeouts to remain valid", err)
+	}
+}
+
 func TestValidateAllowsZeroUpstreamTimeout(t *testing.T) {
 	o := NewProxyRunOptions()
 	o.Flags()
