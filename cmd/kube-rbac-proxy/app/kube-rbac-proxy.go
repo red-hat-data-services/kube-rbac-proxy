@@ -265,6 +265,11 @@ func Complete(o *options.ProxyRunOptions) (*completedProxyRunOptions, error) {
 	return completed, nil
 }
 
+func configureHTTP2Server(srv *http.Server, http2Options *http2.Server) error {
+	serverOptions := *http2Options
+	return http2.ConfigureServer(srv, &serverOptions)
+}
+
 func Run(cfg *completedProxyRunOptions) error {
 	var authenticator authenticator.Request
 	ctx, cancel := context.WithCancel(context.Background())
@@ -408,7 +413,7 @@ func Run(cfg *completedProxyRunOptions) error {
 			}
 			srv.TLSConfig.ClientAuth = tls.RequestClientCert
 
-			if err := http2.ConfigureServer(srv, cfg.http2Options); err != nil {
+			if err := configureHTTP2Server(srv, cfg.http2Options); err != nil {
 				return fmt.Errorf("failed to configure http2 server: %w", err)
 			}
 			srv.TLSConfig.NextProtos = []string{"h2", "http/1.1"}
@@ -440,7 +445,7 @@ func Run(cfg *completedProxyRunOptions) error {
 				// reads are safe here: only bodyless probes.
 				proxyEndpointsSrv := newTLSServer(proxyEndpointsMux, srv.TLSConfig.Clone(), cfg.readHeaderTimeout, cfg.idleTimeout, true)
 
-				if err := http2.ConfigureServer(proxyEndpointsSrv, cfg.http2Options); err != nil {
+				if err := configureHTTP2Server(proxyEndpointsSrv, cfg.http2Options); err != nil {
 					return fmt.Errorf("failed to configure http2 server: %w", err)
 				}
 				proxyEndpointsSrv.TLSConfig.NextProtos = []string{"h2", "http/1.1"}
