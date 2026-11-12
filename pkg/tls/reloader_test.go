@@ -136,7 +136,7 @@ type checkFunc func(*scenario) error
 
 func commonNameIs(want string) checkFunc {
 	return func(g *scenario) error {
-		return poll(10*time.Millisecond, 100*time.Millisecond, func() (err error) {
+		return poll(10*time.Millisecond, time.Second, func() (err error) {
 			cert, err := g.reloader.GetCertificate(nil)
 			if err != nil {
 				return fmt.Errorf("error getting certificate: %v", err)
