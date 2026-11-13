@@ -1199,6 +1199,24 @@ users: [{name: test, user: {token: test}}]
 	}
 }
 
+func TestConfigureHTTP2ServerConfiguresMultipleServers(t *testing.T) {
+	baseOptions := &http2.Server{MaxConcurrentStreams: 10}
+	wantBaseOptions := &http2.Server{MaxConcurrentStreams: 10}
+
+	for _, name := range []string{"proxy", "proxy endpoints"} {
+		t.Run(name, func(t *testing.T) {
+			srv := &http.Server{TLSConfig: &tls.Config{}}
+			if err := configureHTTP2Server(srv, baseOptions); err != nil {
+				t.Fatalf("configure HTTP/2 server: %v", err)
+			}
+		})
+	}
+
+	if !reflect.DeepEqual(baseOptions, wantBaseOptions) {
+		t.Fatal("configuring HTTP/2 servers mutated the base options")
+	}
+}
+
 func TestCommandExposesServerReadTimeouts(t *testing.T) {
 	cmd := NewKubeRBACProxyCommand()
 	for name, want := range map[string]string{
