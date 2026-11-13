@@ -265,9 +265,12 @@ func Complete(o *options.ProxyRunOptions) (*completedProxyRunOptions, error) {
 	return completed, nil
 }
 
-func configureHTTP2Server(srv *http.Server, http2Options *http2.Server) error {
+func configureHTTP2Server(srv *http.Server, http2Options *http2.Server) (*http2.Server, error) {
 	serverOptions := *http2Options
-	return http2.ConfigureServer(srv, &serverOptions)
+	if err := http2.ConfigureServer(srv, &serverOptions); err != nil {
+		return nil, err
+	}
+	return &serverOptions, nil
 }
 
 func Run(cfg *completedProxyRunOptions) error {
@@ -413,7 +416,7 @@ func Run(cfg *completedProxyRunOptions) error {
 			}
 			srv.TLSConfig.ClientAuth = tls.RequestClientCert
 
-			if err := configureHTTP2Server(srv, cfg.http2Options); err != nil {
+			if _, err := configureHTTP2Server(srv, cfg.http2Options); err != nil {
 				return fmt.Errorf("failed to configure http2 server: %w", err)
 			}
 			srv.TLSConfig.NextProtos = []string{"h2", "http/1.1"}
@@ -445,7 +448,7 @@ func Run(cfg *completedProxyRunOptions) error {
 				// reads are safe here: only bodyless probes.
 				proxyEndpointsSrv := newTLSServer(proxyEndpointsMux, srv.TLSConfig.Clone(), cfg.readHeaderTimeout, cfg.idleTimeout, true)
 
-				if err := configureHTTP2Server(proxyEndpointsSrv, cfg.http2Options); err != nil {
+				if _, err := configureHTTP2Server(proxyEndpointsSrv, cfg.http2Options); err != nil {
 					return fmt.Errorf("failed to configure http2 server: %w", err)
 				}
 				proxyEndpointsSrv.TLSConfig.NextProtos = []string{"h2", "http/1.1"}
@@ -482,10 +485,14 @@ func Run(cfg *completedProxyRunOptions) error {
 			// bounded by the enforced --upstream-timeout, so no blanket
 			// ReadTimeout.
 			srv := &http.Server{
-				Handler:           h2c.NewHandler(mux, cfg.http2Options),
 				ReadHeaderTimeout: cfg.readHeaderTimeout,
 				IdleTimeout:       cfg.idleTimeout,
 			}
+			h2cOptions, err := configureHTTP2Server(srv, cfg.http2Options)
+			if err != nil {
+				return fmt.Errorf("failed to configure http2 server: %w", err)
+			}
+			srv.Handler = h2c.NewHandler(mux, h2cOptions)
 
 			l, err := net.Listen("tcp", cfg.insecureListenAddress)
 			if err != nil {
