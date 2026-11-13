@@ -17,11 +17,19 @@ limitations under the License.
 package app
 
 import (
+	"context"
+	"crypto/tls"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 
 	"github.com/brancz/kube-rbac-proxy/pkg/authz"
 	"github.com/google/go-cmp/cmp"
@@ -217,5 +225,73 @@ func Test_parseAuthorizationConfigFile(t *testing.T) {
 				t.Errorf("parseAuthorizationConfigFile(): %s", cmp.Diff(got, tt.want))
 			}
 		})
+	}
+}
+
+func TestConfigureHTTP2ServerConfiguresMultipleServers(t *testing.T) {
+	baseOptions := &http2.Server{MaxConcurrentStreams: 10}
+	wantBaseOptions := &http2.Server{MaxConcurrentStreams: 10}
+
+	proxyOptions, err := configureHTTP2Server(&http.Server{TLSConfig: &tls.Config{}}, baseOptions)
+	if err != nil {
+		t.Fatalf("configure proxy server: %v", err)
+	}
+	endpointsOptions, err := configureHTTP2Server(&http.Server{TLSConfig: &tls.Config{}}, baseOptions)
+	if err != nil {
+		t.Fatalf("configure proxy endpoints server: %v", err)
+	}
+	if proxyOptions == endpointsOptions {
+		t.Fatal("HTTP/2 servers share configured options")
+	}
+
+	if !reflect.DeepEqual(baseOptions, wantBaseOptions) {
+		t.Fatal("configuring HTTP/2 servers mutated the base options")
+	}
+}
+
+func newH2CTestServer(t *testing.T, handler http.Handler, baseOptions *http2.Server) (*httptest.Server, *http2.Transport) {
+	t.Helper()
+	server := httptest.NewUnstartedServer(http.NotFoundHandler())
+	h2cOptions, err := configureHTTP2Server(server.Config, baseOptions)
+	if err != nil {
+		t.Fatalf("configure h2c server: %v", err)
+	}
+	server.Config.Handler = h2c.NewHandler(handler, h2cOptions)
+	server.Start()
+	t.Cleanup(server.Close)
+
+	transport := &http2.Transport{
+		AllowHTTP: true,
+		DialTLSContext: func(ctx context.Context, network, address string, _ *tls.Config) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, address)
+		},
+	}
+	t.Cleanup(transport.CloseIdleConnections)
+	return server, transport
+}
+
+func TestConfigureHTTP2ServerSupportsPlaintextH2C(t *testing.T) {
+	server, transport := newH2CTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}), &http2.Server{MaxConcurrentStreams: 10})
+
+	plainClient := &http.Client{Transport: &http.Transport{Proxy: nil}}
+	plainResponse, err := plainClient.Get(server.URL)
+	if err != nil {
+		t.Fatalf("HTTP/1 request: %v", err)
+	}
+	plainResponse.Body.Close()
+	if plainResponse.ProtoMajor != 1 || plainResponse.StatusCode != http.StatusNoContent {
+		t.Fatalf("HTTP/1 response = %s %d, want HTTP/1.x %d", plainResponse.Proto, plainResponse.StatusCode, http.StatusNoContent)
+	}
+
+	h2Client := &http.Client{Transport: transport}
+	h2Response, err := h2Client.Get(server.URL)
+	if err != nil {
+		t.Fatalf("h2c request: %v", err)
+	}
+	h2Response.Body.Close()
+	if h2Response.ProtoMajor != 2 || h2Response.StatusCode != http.StatusNoContent {
+		t.Fatalf("h2c response = %s %d, want HTTP/2 %d", h2Response.Proto, h2Response.StatusCode, http.StatusNoContent)
 	}
 }
