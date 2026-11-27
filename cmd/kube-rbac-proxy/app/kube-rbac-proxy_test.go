@@ -1201,6 +1201,79 @@ users: [{name: test, user: {token: test}}]
 	}
 }
 
+func TestCompleteHTTP2HealthCheck(t *testing.T) {
+	kubeconfig := filepath.Join(t.TempDir(), "kubeconfig")
+	if err := os.WriteFile(kubeconfig, []byte(`apiVersion: v1
+kind: Config
+clusters: [{name: test, cluster: {server: "https://127.0.0.1:6443"}}]
+contexts: [{name: test, context: {cluster: test, user: test}}]
+current-context: test
+users: [{name: test, user: {token: test}}]
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	base := func() *options.ProxyRunOptions {
+		o := options.NewProxyRunOptions()
+		o.KubeconfigLocation = kubeconfig
+		o.Upstream = "https://upstream.example.com"
+		return o
+	}
+
+	t.Run("defaults enable the health check", func(t *testing.T) {
+		completed, err := Complete(base())
+		if err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		if completed.http2Options.ReadIdleTimeout != 30*time.Second {
+			t.Fatalf("http2 ReadIdleTimeout = %v, want %v", completed.http2Options.ReadIdleTimeout, 30*time.Second)
+		}
+		if completed.http2Options.PingTimeout != 30*time.Second {
+			t.Fatalf("http2 PingTimeout = %v, want %v", completed.http2Options.PingTimeout, 30*time.Second)
+		}
+	})
+
+	t.Run("zero read idle disables the health check", func(t *testing.T) {
+		o := base()
+		o.HTTP2ReadIdleTimeout = 0
+		o.HTTP2PingTimeout = 5 * time.Second
+		completed, err := Complete(o)
+		if err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		if completed.http2Options.ReadIdleTimeout != 0 {
+			t.Fatalf("http2 ReadIdleTimeout = %v, want 0", completed.http2Options.ReadIdleTimeout)
+		}
+		if completed.http2Options.PingTimeout != 0 {
+			t.Fatalf("http2 PingTimeout = %v, want 0", completed.http2Options.PingTimeout)
+		}
+	})
+
+	t.Run("zero ping timeout falls back to 30s when enabled", func(t *testing.T) {
+		o := base()
+		o.HTTP2PingTimeout = 0
+		completed, err := Complete(o)
+		if err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		if completed.http2Options.PingTimeout != 30*time.Second {
+			t.Fatalf("http2 PingTimeout = %v, want 30s", completed.http2Options.PingTimeout)
+		}
+	})
+
+	t.Run("negative read idle disables the health check", func(t *testing.T) {
+		o := base()
+		o.HTTP2ReadIdleTimeout = -1
+		completed, err := Complete(o)
+		if err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		if completed.http2Options.ReadIdleTimeout != 0 {
+			t.Fatalf("http2 ReadIdleTimeout = %v, want 0", completed.http2Options.ReadIdleTimeout)
+		}
+	})
+}
+
 func TestConfigureHTTP2ServerConfiguresMultipleServers(t *testing.T) {
 	baseOptions := &http2.Server{MaxConcurrentStreams: 10}
 	wantBaseOptions := &http2.Server{MaxConcurrentStreams: 10}
@@ -1219,6 +1292,61 @@ func TestConfigureHTTP2ServerConfiguresMultipleServers(t *testing.T) {
 
 	if !reflect.DeepEqual(baseOptions, wantBaseOptions) {
 		t.Fatal("configuring HTTP/2 servers mutated the base options")
+	}
+}
+
+func TestConfigureHTTP2ServerMapsOptionsToHTTP2Config(t *testing.T) {
+	baseOptions := &http2.Server{
+		MaxConcurrentStreams:         7,
+		MaxReadFrameSize:             32 * 1024,
+		MaxUploadBufferPerStream:     32 * 1024,
+		MaxUploadBufferPerConnection: 32 * 1024 * 7,
+		ReadIdleTimeout:              30 * time.Second,
+		PingTimeout:                  30 * time.Second,
+	}
+
+	srv := &http.Server{TLSConfig: &tls.Config{}}
+	if _, err := configureHTTP2Server(srv, baseOptions); err != nil {
+		t.Fatalf("configure server: %v", err)
+	}
+
+	h2 := srv.HTTP2
+	if h2 == nil {
+		t.Fatal("http.Server.HTTP2 was not set")
+	}
+	if h2.MaxConcurrentStreams != 7 {
+		t.Fatalf("HTTP2.MaxConcurrentStreams = %v, want 7", h2.MaxConcurrentStreams)
+	}
+	if h2.MaxReadFrameSize != 32*1024 {
+		t.Fatalf("HTTP2.MaxReadFrameSize = %v, want 32768", h2.MaxReadFrameSize)
+	}
+	if h2.MaxReceiveBufferPerStream != 32*1024 {
+		t.Fatalf("HTTP2.MaxReceiveBufferPerStream = %v, want 32768", h2.MaxReceiveBufferPerStream)
+	}
+	if h2.MaxReceiveBufferPerConnection != 32*1024*7 {
+		t.Fatalf("HTTP2.MaxReceiveBufferPerConnection = %v, want 229376", h2.MaxReceiveBufferPerConnection)
+	}
+	if h2.SendPingTimeout != 30*time.Second {
+		t.Fatalf("HTTP2.SendPingTimeout = %v, want 30s", h2.SendPingTimeout)
+	}
+	if h2.PingTimeout != 30*time.Second {
+		t.Fatalf("HTTP2.PingTimeout = %v, want 30s", h2.PingTimeout)
+	}
+}
+
+func TestConfigureHTTP2ServerDisabledHealthCheck(t *testing.T) {
+	baseOptions := &http2.Server{ReadIdleTimeout: 0, PingTimeout: 0}
+
+	srv := &http.Server{TLSConfig: &tls.Config{}}
+	if _, err := configureHTTP2Server(srv, baseOptions); err != nil {
+		t.Fatalf("configure server: %v", err)
+	}
+
+	if srv.HTTP2.SendPingTimeout != 0 {
+		t.Fatalf("HTTP2.SendPingTimeout = %v, want 0", srv.HTTP2.SendPingTimeout)
+	}
+	if srv.HTTP2.PingTimeout != 0 {
+		t.Fatalf("HTTP2.PingTimeout = %v, want 0", srv.HTTP2.PingTimeout)
 	}
 }
 

@@ -37,6 +37,16 @@ const (
 	defaultAuthTimeout       = 30 * time.Second
 	defaultReadHeaderTimeout = 10 * time.Second
 	defaultIdleTimeout       = 60 * time.Second
+	// The HTTP/2 health check bounds slow-client (slowloris-style) stalls on
+	// HTTP/2 connections, including the request header phase, which no other
+	// timeout covers: http.Server.ReadHeaderTimeout is not applied to
+	// HTTP/2 request headers, and the idle timer is stopped while any stream
+	// is open. The health check closes the whole connection when no frame has
+	// been received for HTTP2ReadIdleTimeout and a PING is not answered within
+	// HTTP2PingTimeout. Live clients answer PINGs, so keep-alive connections
+	// with quiet but responsive peers are unaffected.
+	DefaultHTTP2ReadIdleTimeout = 30 * time.Second
+	DefaultHTTP2PingTimeout     = 30 * time.Second
 )
 
 type ProxyRunOptions struct {
@@ -61,6 +71,9 @@ type ProxyRunOptions struct {
 
 	HTTP2MaxConcurrentStreams uint32
 	HTTP2MaxSize              uint32
+
+	HTTP2ReadIdleTimeout time.Duration
+	HTTP2PingTimeout     time.Duration
 
 	QPS   float32
 	Burst int
@@ -89,10 +102,12 @@ type TLSConfig struct {
 
 func NewProxyRunOptions() *ProxyRunOptions {
 	return &ProxyRunOptions{
-		UpstreamTimeout:   defaultUpstreamTimeout,
-		ReadHeaderTimeout: defaultReadHeaderTimeout,
-		IdleTimeout:       defaultIdleTimeout,
-		AuthTimeout:       defaultAuthTimeout,
+		UpstreamTimeout:      defaultUpstreamTimeout,
+		ReadHeaderTimeout:    defaultReadHeaderTimeout,
+		IdleTimeout:          defaultIdleTimeout,
+		AuthTimeout:          defaultAuthTimeout,
+		HTTP2ReadIdleTimeout: DefaultHTTP2ReadIdleTimeout,
+		HTTP2PingTimeout:     DefaultHTTP2PingTimeout,
 		Auth: &proxy.Config{
 			Authentication: &authn.AuthnConfig{
 				X509:   &authn.X509Config{},
@@ -116,7 +131,7 @@ func (o *ProxyRunOptions) Flags() k8sapiflag.NamedFlagSets {
 	flagset.StringVar(&o.SecureListenAddress, "secure-listen-address", "", "The address the kube-rbac-proxy HTTPs server should listen on.")
 	flagset.StringVar(&o.Upstream, "upstream", "", "The upstream URL to proxy to once requests have successfully been authenticated and authorized.")
 	flagset.DurationVar(&o.UpstreamTimeout, "upstream-timeout", defaultUpstreamTimeout, "Maximum total time from request start through authentication, authorization, writing the upstream request, and receiving upstream response headers. A value of 0 disables the overall timeout; response-body streaming is not limited.")
-	flagset.DurationVar(&o.ReadHeaderTimeout, "read-header-timeout", defaultReadHeaderTimeout, "Maximum duration the servers wait for a request's headers on HTTP/1.1 connections. A value of 0 disables the bound. The proxy listeners set no fixed request-body read deadline: --upstream-timeout cancels the upstream request only when non-zero, and does not guarantee that a stalled inbound body read ends. The /healthz probe listener also applies this value as a full read deadline since it serves only bodyless probes. HTTP/2 header reads on the proxy listeners are not bounded by this flag: golang.org/x/net/http2 has no header-only deadline, and its only read deadline (http.Server.ReadTimeout) would also bound request bodies.")
+	flagset.DurationVar(&o.ReadHeaderTimeout, "read-header-timeout", defaultReadHeaderTimeout, "Maximum duration the servers wait for a request's headers on HTTP/1.1 connections. A value of 0 disables the bound. The proxy listeners set no fixed request-body read deadline: --upstream-timeout cancels the upstream request only when non-zero, and does not guarantee that a stalled inbound body read ends. The /healthz probe listener also applies this value as a full read deadline since it serves only bodyless probes. HTTP/2 request headers are not bounded by this flag (golang.org/x/net/http2 applies no header-only deadline); the HTTP/2 health check (--http2-read-idle-timeout, --http2-ping-timeout) bounds unresponsive HTTP/2 connections by closing the connection instead.")
 	flagset.DurationVar(&o.IdleTimeout, "idle-timeout", defaultIdleTimeout, "Maximum duration the servers wait for the next request on a keep-alive connection. A value of 0 disables the bound.")
 	flagset.BoolVar(&o.UpstreamForceH2C, "upstream-force-h2c", false, "Force h2c to communicate with the upstream. This is required when the upstream speaks h2c(http/2 cleartext - insecure variant of http/2) only. For example, go-grpc server in the insecure mode, such as helm's tiller w/o TLS, speaks h2c only")
 	flagset.StringVar(&o.UpstreamCAFile, "upstream-ca-file", "", "The CA the upstream uses for TLS connection. This is required when the upstream uses TLS and its own CA certificate")
@@ -162,6 +177,8 @@ func (o *ProxyRunOptions) Flags() k8sapiflag.NamedFlagSets {
 	// HTTP2 flags
 	flagset.Uint32Var(&o.HTTP2MaxConcurrentStreams, "http2-max-concurrent-streams", 100, "The maximum number of concurrent streams per HTTP/2 connection.")
 	flagset.Uint32Var(&o.HTTP2MaxSize, "http2-max-size", 256*1024, "The maximum number of bytes that the server will accept for frame size and buffer per stream in a HTTP/2 request.")
+	flagset.DurationVar(&o.HTTP2ReadIdleTimeout, "http2-read-idle-timeout", DefaultHTTP2ReadIdleTimeout, "HTTP/2 health check interval: if no frame is received from the client for this duration, the server sends a PING, and with --http2-ping-timeout closes the connection if it is not answered. This bounds HTTP/2 connections that stop responding, including a request whose headers are never completed, which no other timeout covers: --read-header-timeout does not apply to HTTP/2 request headers, and --idle-timeout is stopped while any stream is open. Two limits: a single frame, or a HEADERS/CONTINUATION block (which the server delivers as one unit once complete), whose total transfer takes longer than the combined read-idle and ping timeouts closes the connection even for an active client, so raise these timeouts (or lower --http2-max-size, for large DATA frames) for slow links; and a client that answers PINGs is not bounded, so a slowly dribbled request body can still hold the connection indefinitely. A value of 0 or less disables the health check and removes the unresponsive-connection bound.")
+	flagset.DurationVar(&o.HTTP2PingTimeout, "http2-ping-timeout", DefaultHTTP2PingTimeout, "HTTP/2 health check timeout: the connection is closed if a PING sent after --http2-read-idle-timeout is not answered within this duration. Only used when --http2-read-idle-timeout is greater than zero; a value of 0 or less falls back to 30s when the health check is enabled.")
 
 	// Audit flags
 	auditFlagSet := namedFlagSets.FlagSet("audit logging")

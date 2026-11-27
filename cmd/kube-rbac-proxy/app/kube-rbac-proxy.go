@@ -262,15 +262,66 @@ func Complete(o *options.ProxyRunOptions) (*completedProxyRunOptions, error) {
 		MaxUploadBufferPerConnection: int32(o.HTTP2MaxSize) * int32(o.HTTP2MaxConcurrentStreams),
 	}
 
+	// HTTP/2 health check: bounds slow-client stalls (including the request
+	// header phase, which no other timeout covers) by closing connections on
+	// which no frame arrives for ReadIdleTimeout and a PING goes unanswered
+	// for PingTimeout. Enabled by default; ReadIdleTimeout <= 0 disables it.
+	if o.HTTP2ReadIdleTimeout > 0 {
+		completed.http2Options.ReadIdleTimeout = o.HTTP2ReadIdleTimeout
+		pingTimeout := o.HTTP2PingTimeout
+		if pingTimeout <= 0 {
+			pingTimeout = options.DefaultHTTP2PingTimeout
+		}
+		completed.http2Options.PingTimeout = pingTimeout
+	}
+
 	return completed, nil
 }
 
 func configureHTTP2Server(srv *http.Server, http2Options *http2.Server) (*http2.Server, error) {
-	serverOptions := *http2Options
-	if err := http2.ConfigureServer(srv, &serverOptions); err != nil {
+	// Build a fresh x/net Server per call. On Go 1.27+ the x/net
+	// implementation is a wrapper around the standard library that allows
+	// only one ConfigureServer call per http2.Server (it panics on a second
+	// call with the same Server, which is what the pre-#44 shared-pointer
+	// pattern hit). Constructing a new Server per call satisfies that
+	// constraint explicitly.
+	serverOptions := &http2.Server{
+		IdleTimeout:                  http2Options.IdleTimeout,
+		MaxConcurrentStreams:         http2Options.MaxConcurrentStreams,
+		MaxDecoderHeaderTableSize:    http2Options.MaxDecoderHeaderTableSize,
+		MaxEncoderHeaderTableSize:    http2Options.MaxEncoderHeaderTableSize,
+		MaxReadFrameSize:             http2Options.MaxReadFrameSize,
+		MaxUploadBufferPerStream:     http2Options.MaxUploadBufferPerStream,
+		MaxUploadBufferPerConnection: http2Options.MaxUploadBufferPerConnection,
+		ReadIdleTimeout:              http2Options.ReadIdleTimeout,
+		PingTimeout:                  http2Options.PingTimeout,
+	}
+	if err := http2.ConfigureServer(srv, serverOptions); err != nil {
 		return nil, err
 	}
-	return &serverOptions, nil
+	// Also map the options into http.Server.HTTP2, the standard library's
+	// documented native HTTP/2 configuration. The x/net wrapper forwards
+	// these options itself on Go 1.27+, and on Go 1.26 the x/net options
+	// govern via TLSNextProto, so the mapping is redundant defense in depth:
+	// it pins the same values through the documented native config in case
+	// the wrapper's forwarding changes.
+	h2 := &http.HTTP2Config{}
+	if serverOptions.MaxConcurrentStreams > 0 {
+		h2.MaxConcurrentStreams = int(serverOptions.MaxConcurrentStreams)
+	}
+	if serverOptions.MaxReadFrameSize > 0 {
+		h2.MaxReadFrameSize = int(serverOptions.MaxReadFrameSize)
+	}
+	if serverOptions.MaxUploadBufferPerConnection > 0 {
+		h2.MaxReceiveBufferPerConnection = int(serverOptions.MaxUploadBufferPerConnection)
+	}
+	if serverOptions.MaxUploadBufferPerStream > 0 {
+		h2.MaxReceiveBufferPerStream = int(serverOptions.MaxUploadBufferPerStream)
+	}
+	h2.SendPingTimeout = serverOptions.ReadIdleTimeout
+	h2.PingTimeout = serverOptions.PingTimeout
+	srv.HTTP2 = h2
+	return serverOptions, nil
 }
 
 func Run(cfg *completedProxyRunOptions) error {
