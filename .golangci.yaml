@@ -8,12 +8,13 @@ linters:
       - legacy
       - std-error-handling
     rules:
-      # FIXME: golang.org/x/net v0.58.0 deprecated http2/h2c in favour of setting
-      # http.Server.Protocols. Migrating the serving path is out of scope for a
-      # dependency bump; tracked separately.
+      # FIXME: golang.org/x/net deprecated the http2 and http2/h2c packages in
+      # favour of setting http.Server.Protocols and http.HTTP2Config. Migrating
+      # the serving path is out of scope for a dependency bump; tracked
+      # separately.
       - linters:
           - staticcheck
-        text: "SA1019:.*h2c"
+        text: "SA1019:.*golang.org/x/net/http2"
     paths:
       - test/
       - third_party$
